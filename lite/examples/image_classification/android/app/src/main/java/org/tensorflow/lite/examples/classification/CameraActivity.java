@@ -36,7 +36,6 @@ import android.os.HandlerThread;
 import android.os.Trace;
 import androidx.annotation.NonNull;
 import androidx.annotation.UiThread;
-import com.google.android.material.bottomsheet.BottomSheetBehavior;
 import androidx.appcompat.app.AppCompatActivity;
 import androidx.appcompat.widget.Toolbar;
 import android.util.Size;
@@ -50,6 +49,7 @@ import android.widget.LinearLayout;
 import android.widget.Spinner;
 import android.widget.TextView;
 import android.widget.Toast;
+import com.google.android.material.bottomsheet.BottomSheetBehavior;
 import java.nio.ByteBuffer;
 import java.util.List;
 import org.tensorflow.lite.examples.classification.env.ImageUtils;
@@ -377,14 +377,21 @@ public abstract class CameraActivity extends AppCompatActivity
   public void onRequestPermissionsResult(
       final int requestCode, final String[] permissions, final int[] grantResults) {
     if (requestCode == PERMISSIONS_REQUEST) {
-      if (grantResults.length > 0
-          && grantResults[0] == PackageManager.PERMISSION_GRANTED
-          && grantResults[1] == PackageManager.PERMISSION_GRANTED) {
+      if (allPermissionsGranted(grantResults)) {
         setFragment();
       } else {
         requestPermission();
       }
     }
+  }
+
+  private static boolean allPermissionsGranted(final int[] grantResults) {
+    for (int result : grantResults) {
+      if (result != PackageManager.PERMISSION_GRANTED) {
+        return false;
+      }
+    }
+    return true;
   }
 
   private boolean hasPermission() {
@@ -554,7 +561,7 @@ public abstract class CameraActivity extends AppCompatActivity
   }
 
   protected void showCameraResolution(String cameraInfo) {
-    cameraResolutionTextView.setText(previewWidth + "x" + previewHeight);
+    cameraResolutionTextView.setText(cameraInfo);
   }
 
   protected void showRotationInfo(String rotation) {

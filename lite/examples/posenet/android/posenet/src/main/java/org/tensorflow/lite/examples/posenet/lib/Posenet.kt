@@ -26,6 +26,7 @@ import java.nio.MappedByteBuffer
 import java.nio.channels.FileChannel
 import kotlin.math.exp
 import org.tensorflow.lite.Interpreter
+import org.tensorflow.lite.gpu.GpuDelegate
 
 enum class BodyPart {
   NOSE,
@@ -63,12 +64,46 @@ class Person {
   var score: Float = 0.0f
 }
 
-class Posenet(context: Context) {
+enum class Device {
+  CPU,
+  NNAPI,
+  GPU
+}
+
+class Posenet(
+  val context: Context,
+  val filename: String = "posenet_model.tflite",
+  val device: Device = Device.CPU
+) : AutoCloseable {
+  var lastInferenceTimeNanos: Long = -1
+    private set
+
   /** An Interpreter for the TFLite model.   */
   private var interpreter: Interpreter? = null
+  private var gpuDelegate: GpuDelegate? = null
 
-  init {
-    interpreter = Interpreter(loadModelFile("posenet_model.tflite", context))
+  private fun getInterpreter(): Interpreter {
+    if (interpreter != null) {
+      return interpreter!!
+    }
+    val options = Interpreter.Options()
+    when (device) {
+      Device.CPU -> { }
+      Device.GPU -> {
+        gpuDelegate = GpuDelegate()
+        options.addDelegate(gpuDelegate)
+      }
+      Device.NNAPI -> options.setUseNNAPI(true)
+    }
+    interpreter = Interpreter(loadModelFile(filename, context), options)
+    return interpreter!!
+  }
+
+  override fun close() {
+    interpreter?.close()
+    interpreter = null
+    gpuDelegate?.close()
+    gpuDelegate = null
   }
 
   /** Returns value within [0,1].   */
@@ -117,7 +152,7 @@ class Posenet(context: Context) {
   private fun initOutputMap(interpreter: Interpreter): HashMap<Int, Any> {
     val outputMap = HashMap<Int, Any>()
 
-    // 1 * 17 * 17 * 17 contains heatmaps
+    // 1 * 9 * 9 * 17 contains heatmaps
     val heatmapsShape = interpreter.getOutputTensor(0).shape()
     outputMap[0] = Array(heatmapsShape[0]) {
       Array(heatmapsShape[1]) {
@@ -125,13 +160,13 @@ class Posenet(context: Context) {
       }
     }
 
-    // 1 * 17 * 17 * 34 contains offsets
+    // 1 * 9 * 9 * 34 contains offsets
     val offsetsShape = interpreter.getOutputTensor(1).shape()
     outputMap[1] = Array(offsetsShape[0]) {
       Array(offsetsShape[1]) { Array(offsetsShape[2]) { FloatArray(offsetsShape[3]) } }
     }
 
-    // 1 * 17 * 17 * 32 contains forward displacements
+    // 1 * 9 * 9 * 32 contains forward displacements
     val displacementsFwdShape = interpreter.getOutputTensor(2).shape()
     outputMap[2] = Array(offsetsShape[0]) {
       Array(displacementsFwdShape[1]) {
@@ -139,7 +174,7 @@ class Posenet(context: Context) {
       }
     }
 
-    // 1 * 17 * 17 * 32 contains backward displacements
+    // 1 * 9 * 9 * 32 contains backward displacements
     val displacementsBwdShape = interpreter.getOutputTensor(3).shape()
     outputMap[3] = Array(displacementsBwdShape[0]) {
       Array(displacementsBwdShape[1]) {
@@ -158,17 +193,25 @@ class Posenet(context: Context) {
    *      person: a Person object containing data about keypoint locations and confidence scores
    */
   fun estimateSinglePose(bitmap: Bitmap): Person {
-    var t1: Long = SystemClock.elapsedRealtimeNanos()
+    val estimationStartTimeNanos = SystemClock.elapsedRealtimeNanos()
     val inputArray = arrayOf(initInputArray(bitmap))
-    var t2: Long = SystemClock.elapsedRealtimeNanos()
-    Log.i("posenet", String.format("Scaling to [-1,1] took %.2f ms", 1.0f * (t2 - t1) / 1_000_000))
+    Log.i(
+      "posenet",
+      String.format(
+        "Scaling to [-1,1] took %.2f ms",
+        1.0f * (SystemClock.elapsedRealtimeNanos() - estimationStartTimeNanos) / 1_000_000
+      )
+    )
 
-    val outputMap = initOutputMap(interpreter!!)
+    val outputMap = initOutputMap(getInterpreter())
 
-    t1 = SystemClock.elapsedRealtimeNanos()
-    interpreter!!.runForMultipleInputsOutputs(inputArray, outputMap)
-    t2 = SystemClock.elapsedRealtimeNanos()
-    Log.i("posenet", String.format("Interpreter took %.2f ms", 1.0f * (t2 - t1) / 1_000_000))
+    val inferenceStartTimeNanos = SystemClock.elapsedRealtimeNanos()
+    getInterpreter().runForMultipleInputsOutputs(inputArray, outputMap)
+    lastInferenceTimeNanos = SystemClock.elapsedRealtimeNanos() - inferenceStartTimeNanos
+    Log.i(
+      "posenet",
+      String.format("Interpreter took %.2f ms", 1.0f * lastInferenceTimeNanos / 1_000_000)
+    )
 
     val heatmaps = outputMap[0] as Array<Array<Array<FloatArray>>>
     val offsets = outputMap[1] as Array<Array<Array<FloatArray>>>
@@ -185,7 +228,7 @@ class Posenet(context: Context) {
       var maxCol = 0
       for (row in 0 until height) {
         for (col in 0 until width) {
-          heatmaps[0][row][col][keypoint] = sigmoid(heatmaps[0][row][col][keypoint])
+          heatmaps[0][row][col][keypoint] = heatmaps[0][row][col][keypoint]
           if (heatmaps[0][row][col][keypoint] > maxVal) {
             maxVal = heatmaps[0][row][col][keypoint]
             maxRow = row
@@ -212,7 +255,7 @@ class Posenet(context: Context) {
           offsets[0][positionY]
           [positionX][idx + numKeypoints]
         ).toInt()
-      confidenceScores[idx] = heatmaps[0][positionY][positionX][idx]
+      confidenceScores[idx] = sigmoid(heatmaps[0][positionY][positionX][idx])
     }
 
     val person = Person()
